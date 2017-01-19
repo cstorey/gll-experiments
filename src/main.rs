@@ -1,7 +1,7 @@
 // Inspired by https://github.com/tomjridge/ocaml_gll_examples/blob/master/gll.ml
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, BTreeMap, VecDeque};
 
-#[derive(Clone,Copy,Debug, Eq,PartialEq,Hash)]
+#[derive(Clone,Copy,Debug, Eq,PartialEq,Hash,Ord,PartialOrd)]
 enum Label {
     LS,
     L0,
@@ -16,28 +16,40 @@ enum Label {
     LB,
 }
 
-#[derive(Clone,Copy,Debug, Eq,PartialEq,Hash)]
-struct Extlbl(usize, Label);
+#[derive(Clone,Copy,Debug, Eq,PartialEq,Hash,Ord,PartialOrd)]
+enum Extlbl {
+    Positioned(usize, Label),
+    Dollar,
+}
 
 impl Extlbl {
     fn to_label(&self) -> Label {
-        self.1
+        match self {
+            &Extlbl::Positioned(_, lbl) => lbl,
+            _ => panic!("... eh"),
+        }
     }
 }
 
 type Stack = VecDeque<Extlbl>;
 
-#[derive(Clone,Debug, Eq,PartialEq,Hash)]
-struct Descriptor(Label, Stack, usize);
-
-type R = VecDeque<Descriptor>;
+#[derive(Clone,Debug, Eq,PartialEq,Hash,Ord,PartialOrd)]
+struct Descriptor(Label, Extlbl, usize);
 
 #[derive(Debug, Eq,PartialEq)]
 struct State {
     pc: Label,
     idx: usize,
-    r: R,
-    stack: Stack,
+    r: VecDeque<Descriptor>,
+    // In the paper this is expressed as U_i, or what seems to be a i -> Set<(L, u)>
+    // where `u` is a GSS node.
+    seen: BTreeMap<usize, BTreeSet<(Label, Extlbl)>>,
+    // May need to be Extlbl -> Set Extlbl
+    gss: BTreeMap<Extlbl, BTreeSet<Extlbl>>,
+    // `P`.
+    popped: BTreeSet<(Extlbl, usize)>,
+    // Current GSS node
+    u: Extlbl,
     input: Vec<char>,
 }
 
@@ -50,17 +62,49 @@ enum Status {
 
 impl State {
     fn pop(&mut self, i: usize) {
+        /*
         self.pc = Label::L0;
         let mut stack = self.stack.clone();
         let head = stack.pop_back().expect("stack top");
         let descr = Descriptor(head.to_label(), stack, i);
         println!("Pop: {:?}", descr);
         self.r.push_back(descr);
+        */
+
+        let lbl = self.u.to_label();
+        self.popped.insert((self.u, i));
+        let children =
+            self.gss.get(&self.u).into_iter().flat_map(|vs| vs).cloned().collect::<Vec<_>>();
+        for v in children {
+            self.add(lbl, v, i)
+        }
     }
 
-    fn push(&mut self, lbl: Label, idx: usize) {
-        println!("Push: {:?}; {:?}", lbl, idx);
-        self.stack.push_back(Extlbl(idx, lbl))
+    fn add(&mut self, lbl: Label, u: Extlbl, idx: usize) {
+        let ui = self.seen.entry(idx).or_insert_with(BTreeSet::new);
+        ui.insert((lbl, u));
+        self.r.push_back(Descriptor(lbl, u, idx));
+    }
+
+    fn create(&mut self, lbl: Label, idx: usize) {
+        println!("create: {:?}; {:?}", lbl, idx);
+        let v = Extlbl::Positioned(idx, lbl);
+        let mut toadd = Vec::new();
+        {
+            let mut fromv = self.gss.entry(v).or_insert_with(BTreeSet::new);
+            if !fromv.contains(&self.u) {
+                fromv.insert(self.u);
+                for &(_, k) in self.popped.iter().filter(|&&(ref vp, _)| vp == &v) {
+                    toadd.push((lbl, self.u, k))
+                }
+            }
+        }
+
+        for (lbl, u, k) in toadd {
+            self.add(lbl, u, k)
+        }
+
+        self.u = v;
     }
 
     fn step(&mut self) -> Status {
@@ -68,13 +112,13 @@ impl State {
             Label::LS => {
                 let inp = self.input.get(self.idx).cloned();
                 if [Some('a'), Some('c')].contains(&inp) {
-                    self.r.push_back(Descriptor(Label::LS1, self.stack.clone(), self.idx));
+                    self.r.push_back(Descriptor(Label::LS1, self.u.clone(), self.idx));
                 }
                 if [Some('a'), Some('b')].contains(&inp) {
-                    self.r.push_back(Descriptor(Label::LS2, self.stack.clone(), self.idx));
+                    self.r.push_back(Descriptor(Label::LS2, self.u.clone(), self.idx));
                 }
                 if [Some('d'), None].contains(&inp) {
-                    self.r.push_back(Descriptor(Label::LS3, self.stack.clone(), self.idx));
+                    self.r.push_back(Descriptor(Label::LS3, self.u.clone(), self.idx));
                 }
 
                 self.pc = Label::L0;
@@ -82,77 +126,75 @@ impl State {
             Label::L0 => {
                 if let Some(next) = self.r.pop_front() {
                     println!("Next: {:?}", next);
-                    let Descriptor(lbl, st, i) = next;
-                    println!("L0? {:?}; stack empty? {:?}; {:?} == {:?}? {:?}",
-                             lbl == Label::L0,
-                             st.is_empty(),
-                             i,
-                             self.input.len(),
-                             i == self.input.len());
-                    if lbl == Label::L0 && st.is_empty() && i == self.input.len() {
+                    let Descriptor(lbl, u, i) = next;
+                    self.pc = lbl;
+                    self.u = u;
+                    self.idx = i;
+                } else {
+                    let u0 = Extlbl::Dollar;
+                    if self.seen
+                        .entry(self.input.len())
+                        .or_insert_with(BTreeSet::new)
+                        .contains(&(Label::L0, u0)) {
                         return Status::Success;
                     } else {
-                        self.pc = lbl;
-                        self.stack = st;
-                        self.idx = i;
+                        return Status::Failure;
                     }
-                } else {
-                    return Status::Failure;
                 }
             }
             Label::LS1 => {
                 let i = self.idx;
-                self.push(Label::L1, i);
+                self.create(Label::L1, i);
                 self.pc = Label::LA;
             }
             Label::L1 => {
                 let i = self.idx;
+                self.create(Label::L2, i);
                 self.pc = Label::LS;
-                self.push(Label::L2, i);
             }
             Label::L2 => {
                 let i = self.idx;
                 if self.input.get(i) == Some(&'d') {
                     self.pop(i + 1)
-                } else {
-                    self.pc = Label::L0
                 }
+                self.pc = Label::L0
             }
             Label::LS2 => {
                 let i = self.idx;
-                self.push(Label::L3, i);
+                self.create(Label::L3, i);
                 self.pc = Label::LB;
             }
             Label::L3 => {
                 let i = self.idx;
-                self.push(Label::L4, i);
+                self.create(Label::L4, i);
                 self.pc = Label::LS;
             }
             Label::L4 => {
                 let i = self.idx;
-                self.pop(i)
+                self.pop(i);
+                self.pc = Label::L0;
+
             }
             Label::LS3 => {
                 let i = self.idx;
-                self.pop(i)
+                self.pop(i);
+                self.pc = Label::L0;
             }
             Label::LA => {
                 let i = self.idx;
                 let inp = self.input.get(i).cloned();
                 if [Some('a'), Some('c')].contains(&inp) {
                     self.pop(i + 1)
-                } else {
-                    self.pc = Label::L0
                 }
+                self.pc = Label::L0
             }
             Label::LB => {
                 let i = self.idx;
                 let inp = self.input.get(i).cloned();
                 if [Some('a'), Some('b')].contains(&inp) {
                     self.pop(i + 1)
-                } else {
-                    self.pc = Label::L0
                 }
+                self.pc = Label::L0
             }
             // other => panic!("Unimplemented: {:?}", other),
         }
@@ -161,16 +203,23 @@ impl State {
 }
 
 fn recognises(input: &str) -> bool {
+    let u0 = Extlbl::Dollar;
+    let u1 = Extlbl::Positioned(0, Label::L0);
     let mut s = State {
         pc: Label::LS,
         idx: 0,
+        u: u1,
         r: VecDeque::new(),
-        stack: vec![Extlbl(0, Label::L0)].into_iter().collect(),
+        gss: BTreeMap::new(),
+        popped: BTreeSet::new(),
+        seen: BTreeMap::new(),
         input: input.chars().collect(),
     };
+    // stack: vec![Extlbl::Positioned(0, Label::L0)].into_iter().collect(),
+    s.gss.entry(u1).or_insert_with(BTreeSet::new).insert(u0);
 
     loop {
-        println!("{:?}", s);
+        println!("{:#?}", s);
         match s.step() {
             Status::Success => return true,
             Status::Failure => return false,
@@ -185,6 +234,7 @@ fn main() {
     println!("{:?} => {:?}", input, res);
 }
 #[test]
+//#[ignore]
 fn recognises_empty_string() {
     assert!(recognises(""));
 }
