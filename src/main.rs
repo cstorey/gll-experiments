@@ -1,6 +1,14 @@
 // Inspired by https://github.com/tomjridge/ocaml_gll_examples/blob/master/gll.ml
 use std::collections::{BTreeSet, BTreeMap, VecDeque};
 
+/*
+Grammar: Γ0
+    S ::= ASd | BS | ε
+    // GLL blocks terminated by "∙": A∙S∙d | B∙S∙ | ε∙
+    A ::= a|c
+    B ::= a|b
+*/
+
 #[derive(Clone,Copy,Debug, Eq,PartialEq,Hash,Ord,PartialOrd)]
 enum Label {
     LS,
